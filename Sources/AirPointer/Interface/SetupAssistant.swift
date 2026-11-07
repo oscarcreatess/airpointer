@@ -1,6 +1,6 @@
 import AppKit
 
-// First run: from "just installed" to "pointing" in four steps. Every view is
+// First run: from "just installed" to "pointing" in five steps. Every view is
 // built once; update() arrives ~12×/s and only diffs what is on screen.
 
 // How far the closed case is through connecting: lid open, lid closed, upright.
@@ -16,6 +16,7 @@ struct SetupState:Equatable {
     var link=SetupLink.idle
     var problem:String?=nil          // why the last connection ended, in the user's words
     var accessibilityTrusted=false
+    var plane=PointingPlane.upright
     var calibrating=false
     var calibrated=false
     var holdProgress=0.0
@@ -26,18 +27,21 @@ struct SetupState:Equatable {
 final class SetupAssistant:NSObject,NSWindowDelegate {
     let window:NSWindow
     var onConnect,onChooseAirPods,onLidClosed,onRequestAccessibility,onCalibrate,onLearnTap,onStopLearningTap,onFinish,onClose:(()->Void)?
+    var onChoosePlane:((PointingPlane)->Void)?
     private(set) var step=0
 
     private enum Action{case none,connect,chooseAirPods,lidClosed,openAccessibility,calibrate,learnTap,reconnect,next,finish}
     private static let copy=[
         ("Let AirPointer move the pointer","Press Allow to open the Accessibility list, then drag AirPointer into it so it can move the pointer and click."),
+        ("Choose how to point","Hold the closed case upright in the air, swivel it flat on your desk, or rock it flat like a joystick."),
         ("Connect your AirPods","Hold the closed case with both AirPods inside. Connect, then open the lid."),
         ("Show it where your screen is","Point at three dots — center, right edge, top edge. Hold still on each and it captures automatically. Keep the grip you’ll use."),
-        ("Teach it your tap","Tap the front of the case three times, with a short pause between taps. Hold it the way you’ll point with it."),
+        ("Teach it your tap","Tap the case three times, with a short pause between taps. Keep it the way you’ll point with it."),
     ]
     private static let connectEffects="Your Mac can’t use your AirPods for audio while connected, so don’t connect during a call. Ending a session uses up diagnostic data on the case and changes some AirPods settings. These changes may last."
     private var state=SetupState()
     private var everConnected=false
+    private var styleConfirmed=false
     private var helpDue=false
     private var helpTimer:Timer?
     private var primaryAction=Action.none
@@ -53,6 +57,7 @@ final class SetupAssistant:NSObject,NSWindowDelegate {
     private let stage=RemoteSurface(HomePalette.stage,radius:16)
     private let caseArt=CaseStepView()
     private let access=SetupAccessArt()
+    private let styleArt=SetupStyleArt()
     private let targets=SetupTargetArt()
     private let tapArt=SetupTapArt()
     private let chip=StatusChip()
@@ -69,6 +74,11 @@ final class SetupAssistant:NSObject,NSWindowDelegate {
         window.title="Set Up AirPointer";window.titleVisibility = .hidden
         window.titlebarAppearsTransparent=true;window.titlebarSeparatorStyle = .none
         window.isReleasedWhenClosed=false;window.backgroundColor=HomePalette.canvas;window.delegate=self
+        styleArt.onSelect={[weak self] plane in
+            guard let self else{return}
+            self.state.plane=plane;self.styleConfirmed=true;self.apply()
+            self.onChoosePlane?(plane)
+        }
         build();apply();window.center()
     }
 
@@ -81,14 +91,15 @@ final class SetupAssistant:NSObject,NSWindowDelegate {
     func go(to step:Int) {
         let next=min(Self.copy.count-1,max(0,step)),changed=next != self.step
         waiting?.invalidate();waiting=nil
-        if self.step==3,next != 3{onStopLearningTap?()}
+        if self.step==1,next>1{styleConfirmed=true}
+        if self.step==4,next != 4{onStopLearningTap?()}
         self.step=next
         // The case is already in hand, so this step just starts listening.
-        if next==3,state.connected,!state.taps.learned,!state.taps.listening{onLearnTap?()}
+        if next==4,state.connected,!state.taps.learned,!state.taps.listening{onLearnTap?()}
         apply()
         guard changed else{return}
         if let responder=window.firstResponder as? NSView,responder.isHiddenOrHasHiddenAncestor{window.makeFirstResponder(nil)}
-        reveal(page);announce("Step \(next+1) of \(Self.copy.count). \(next==1 ? linkCopy(state.link).0:Self.copy[next].0)")
+        reveal(page);announce("Step \(next+1) of \(Self.copy.count). \(next==2 ? linkCopy(state.link).0:Self.copy[next].0)")
     }
 
     func update(_ next:SetupState) {
@@ -96,19 +107,19 @@ final class SetupAssistant:NSObject,NSWindowDelegate {
         let old=state,wasConnected=everConnected
         state=next;apply()
         // A link that drops on the tap step takes the listening with it; one that comes back picks it up.
-        if step==3,old.connected != next.connected{
+        if step==4,old.connected != next.connected{
             if !next.connected{onStopLearningTap?()}
             else if !next.taps.learned,!next.taps.failed,!next.taps.listening{onLearnTap?()}
         }
         guard window.isVisible else{return}
-        if step==1,old.link != next.link {
+        if step==2,old.link != next.link {
             reveal(caseArt)
             if next.connected && !wasConnected{announce("Connected")}else if next.link != .idle{announce(linkCopy(next.link).0)}
         }
         if step==0,next.accessibilityTrusted,!old.accessibilityTrusted{announce("Allowed")}
-        if step==2,next.calibrated,!next.calibrating,old.calibrating || !old.calibrated{announce("Calibrated")}
-        if step==3,next.taps.learned,!old.taps.learned{announce("Learned")}
-        else if step==3,next.taps.heard != old.taps.heard,next.taps.heard>0{announce("\(next.taps.heard) of \(ClosedCaseTapLearner.taps)")}
+        if step==3,next.calibrated,!next.calibrating,old.calibrating || !old.calibrated{announce("Calibrated")}
+        if step==4,next.taps.learned,!old.taps.learned{announce("Learned")}
+        else if step==4,next.taps.heard != old.taps.heard,next.taps.heard>0{announce("\(next.taps.heard) of \(ClosedCaseTapLearner.taps)")}
         if let following=Self.following(step,from:old,to:next){
             // Accessibility is granted over in System Settings, so setup comes back to the front.
             if step==0{window.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true)}
@@ -120,16 +131,16 @@ final class SetupAssistant:NSObject,NSWindowDelegate {
     static func following(_ step:Int,from old:SetupState,to next:SetupState)->Int? {
         switch step {
         case 0:return next.accessibilityTrusted && !old.accessibilityTrusted ? 1:nil
-        case 1:return next.connected && !old.connected ? (next.calibrated ? 3:2):nil
-        case 2:return next.calibrated && !next.calibrating && (old.calibrating || !old.calibrated) ? 3:nil
+        case 2:return next.connected && !old.connected ? (next.calibrated ? 4:3):nil
+        case 3:return next.calibrated && !next.calibrating && (old.calibrating || !old.calibrated) ? 4:nil
         default:return nil
         }
     }
     private func lead(to next:Int) {
         go(to:next)
-        guard next==2 else{return}
+        guard next==3 else{return}
         after(Self.readFor){[weak self] in
-            guard let self,self.step==2,self.state.connected,!self.state.calibrated,!self.state.calibrating else{return}
+            guard let self,self.step==3,self.state.connected,!self.state.calibrated,!self.state.calibrating else{return}
             self.onCalibrate?()
         }
     }
@@ -146,8 +157,9 @@ final class SetupAssistant:NSObject,NSWindowDelegate {
 
     private var firstIncomplete:Int {
         if !state.accessibilityTrusted{return 0}
-        if !state.connected{return 1}
-        return state.calibrated ? 3:2
+        if !styleConfirmed && !everConnected{return 1}
+        if !state.connected{return 2}
+        return state.calibrated ? 4:3
     }
 
     private func build() {
@@ -161,7 +173,7 @@ final class SetupAssistant:NSObject,NSWindowDelegate {
         let status=rkVStack([chip,check,note,footer],spacing:12,align:.centerX)
         for view in [titleLabel,bodyLabel,stage,status] as [NSView]{view.translatesAutoresizingMaskIntoConstraints=false;page.addSubview(view)}
         stage.addSubview(caseArt)
-        rkPin(access,in:stage);rkPin(targets,in:stage);rkPin(tapArt,in:stage)
+        rkPin(access,in:stage);rkPin(styleArt,in:stage);rkPin(targets,in:stage);rkPin(tapArt,in:stage)
         caseArt.fill=0.86
         NSLayoutConstraint.activate([
             steps.topAnchor.constraint(equalTo:root.safeAreaLayoutGuide.topAnchor,constant:8),
@@ -206,9 +218,9 @@ final class SetupAssistant:NSObject,NSWindowDelegate {
         let s=state
         if s.connected{everConnected=true}
         // The help line waits for six quiet seconds of looking for the AirPods.
-        if step != 1 || s.link != .connecting{helpTimer?.invalidate();helpTimer=nil;helpDue=false}
+        if step != 2 || s.link != .connecting{helpTimer?.invalidate();helpTimer=nil;helpDue=false}
         else if helpTimer==nil,!helpDue{helpTimer=Timer.scheduledTimer(withTimeInterval:6,repeats:false){[weak self] _ in self?.helpTimer=nil;self?.helpDue=true;self?.apply()}}
-        steps.set(current:step,done:[s.accessibilityTrusted,everConnected,s.calibrated && !s.calibrating,s.taps.learned])
+        steps.set(current:step,done:[s.accessibilityTrusted,styleConfirmed || everConnected,everConnected,s.calibrated && !s.calibrating,s.taps.learned])
         var art:NSView=caseArt,chipText:String?,dot=false,checkText:String?,noteText:String?
         var main=("Continue",Action.next),alt:(String,Action)?
         var copy=Self.copy[step]
@@ -218,6 +230,9 @@ final class SetupAssistant:NSObject,NSWindowDelegate {
             art=access;access.on=s.accessibilityTrusted
             if s.accessibilityTrusted{checkText="Allowed"}else{main=("Allow",.openAccessibility);alt=("Skip for now",.next)}
         case 1:
+            art=styleArt;styleArt.selected=s.plane
+            noteText=s.plane.subtitle
+        case 2:
             // Closed to start, the lid opening, close it, turn it upright: each sub-step brings its own words and art.
             copy=linkCopy(s.link)
             switch s.link {
@@ -234,15 +249,18 @@ final class SetupAssistant:NSObject,NSWindowDelegate {
             case .closeLid:caseArt.step = .close;chipText="Connected";dot=true;main=("Lid Closed",.lidClosed)
             case .turnUpright:caseArt.step = .turn;chipText="Connected";dot=true;main=("Continue",.none)
             case .holdStill:caseArt.step = .closed;caseArt.holdProgress=CGFloat(s.holdProgress);chipText="Keep it still";main=("Continue",.none)
-            case .connected:caseArt.step = .point;chipText="Connected";dot=true
+            case .connected:caseArt.step = s.plane == .upright ? .point:.closed;chipText="Connected";dot=true
             }
-        case 2:
+        case 3:
+            if s.plane != .upright {
+                copy=("Show it where your screen is","Move the flat case toward three dots — center, right edge, top edge. Hold still on each and it captures automatically.")
+            }
             art=targets;targets.done=s.calibrated && !s.calibrating
             if s.calibrating{main=("Calibrating…",.none)}
             else if !s.connected{main=("Connect Again",.reconnect);noteText=s.problem ?? "The case disconnected. Connect again, then open the lid."}
             else if s.calibrated{checkText="Calibrated";alt=("Calibrate Again",.calibrate)}
             else{main=("Start Calibration",.calibrate)}
-        case 3:
+        case 4:
             art=tapArt;tapArt.heard=s.taps.heard
             if !s.connected{main=("Connect Again",.reconnect);noteText=s.problem ?? "The case disconnected. Connect again, then open the lid."}
             // Teaching the tap is the last step, so once it's done the primary finishes setup.
@@ -255,7 +273,7 @@ final class SetupAssistant:NSObject,NSWindowDelegate {
         default:break
         }
         rkSetText(titleLabel,copy.0);rkSetText(bodyLabel,copy.1);show(bodyLabel,!copy.1.isEmpty)
-        for view in [caseArt,access,targets,tapArt] as [NSView]{show(view,view === art)}
+        for view in [caseArt,access,styleArt,targets,tapArt] as [NSView]{show(view,view === art)}
         show(chip,chipText != nil);if let chipText{chip.set(chipText,dot:dot)}
         show(check,checkText != nil);if let checkText{check.text=checkText}
         show(note,noteText != nil);if let noteText{rkSetText(note,noteText)}
@@ -271,13 +289,13 @@ final class SetupAssistant:NSObject,NSWindowDelegate {
 
     private func linkCopy(_ link:SetupLink)->(String,String) {
         switch link {
-        case .idle:return Self.copy[1]
+        case .idle:return Self.copy[2]
         case .openLid:return ("Open the lid","AirPointer connects when you open it. Keep both AirPods inside.")
-        case .connecting:return (Self.copy[1].0,"Keep the lid open for a moment.")
+        case .connecting:return (Self.copy[2].0,"Keep the lid open for a moment.")
         case .closeLid:return ("Close the lid","Keep both AirPods inside. AirPointer goes on by itself, or press Return.")
         case .turnUpright:return ("Turn it upright","Give the closed case a quarter turn clockwise.")
         case .holdStill:return ("Set it down","Put the closed case on a flat surface for a moment.")
-        case .connected:return ("You’re connected","Keep holding the case like this.")
+        case .connected:return ("You’re connected",state.plane == .upright ? "Keep holding the case like this.":"Keep the closed case flat like this.")
         }
     }
     private func show(_ view:NSView,_ visible:Bool){if view.isHidden == visible{view.isHidden = !visible}}
@@ -303,7 +321,7 @@ final class SetupAssistant:NSObject,NSWindowDelegate {
         case .connect:onConnect?();apply()
         case .chooseAirPods:onChooseAirPods?()
         case .lidClosed:onLidClosed?()
-        case .reconnect:go(to:1)
+        case .reconnect:go(to:2)
         case .openAccessibility:onRequestAccessibility?()
         case .calibrate:onCalibrate?()
         case .learnTap:onLearnTap?()
@@ -346,13 +364,13 @@ private func setupCentered(_ text:String,at point:NSPoint,_ attributes:[NSAttrib
     (text as NSString).draw(at:NSPoint(x:point.x-size.width/2,y:point.y-size.height/2),withAttributes:attributes)
 }
 
-// Allow · Connect · Calibrate · Tap, as done, current and next.
+// Allow · Style · Connect · Calibrate · Tap, as done, current and next.
 private final class SetupSteps:NSView {
-    private let names=["Allow","Connect","Calibrate","Tap"]
+    private let names=["Allow","Style","Connect","Calibrate","Tap"]
     private var current = -1
-    private var done=[Bool](repeating:false,count:4)
+    private var done=[Bool](repeating:false,count:5)
     private let font=NSFont.systemFont(ofSize:13),bold=NSFont.systemFont(ofSize:13,weight:.semibold)
-    private let link:CGFloat=20,gap:CGFloat=8
+    private let link:CGFloat=16,gap:CGFloat=6
     override var isFlipped:Bool{true}
     init(){super.init(frame:.zero);translatesAutoresizingMaskIntoConstraints=false}
     required init?(coder:NSCoder){fatalError("init(coder:) is not used")}
@@ -534,5 +552,46 @@ private final class SetupTargetArt:NSView {
             }
             setupCentered("\(index+1)",at:point,[.font:font,.foregroundColor:NSColor(white:1,alpha:index==0 ? 1:0.8)])
         }
+    }
+}
+
+private final class SetupStyleArt:NSView {
+    var selected=PointingPlane.upright{didSet{if selected != oldValue{sync()}}}
+    var onSelect:((PointingPlane)->Void)?
+    private var buttons:[RemoteButton]=[]
+    init() {
+        super.init(frame:.zero)
+        appearance=NSAppearance(named:.darkAqua)
+        let preview=CaseStepView();preview.step = .point;preview.fill=0.72
+        preview.widthAnchor.constraint(equalToConstant:136).isActive=true
+        preview.heightAnchor.constraint(equalToConstant:136).isActive=true
+        buttons=PointingPlane.allCases.enumerated().map{index,plane in
+            let button=RemoteButton(plane.shortTitle,style:plane == .upright ? .secondary:.tertiary,symbol:plane == .upright ? "checkmark":nil,height:36)
+            button.tag=index;button.target=self;button.action=#selector(picked(_:))
+            return button
+        }
+        let row=rkHStack(buttons,spacing:8)
+        let stack=rkVStack([preview,row],spacing:12,align:.centerX)
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo:centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo:centerYAnchor),
+        ])
+        sync()
+    }
+    required init?(coder:NSCoder){fatalError("init(coder:) is not used")}
+    private func sync() {
+        if let preview=subviews.first?.subviews.compactMap({$0 as? CaseStepView}).first {
+            preview.step=selected == .upright ? .point:.closed
+        }
+        for (index,plane) in PointingPlane.allCases.enumerated() where buttons.indices.contains(index) {
+            buttons[index].style=plane == selected ? .secondary:.tertiary
+            buttons[index].symbolName=plane == selected ? "checkmark":nil
+        }
+    }
+    @objc private func picked(_ sender:RemoteButton) {
+        guard PointingPlane.allCases.indices.contains(sender.tag) else{return}
+        let plane=PointingPlane.allCases[sender.tag]
+        selected=plane;onSelect?(plane)
     }
 }

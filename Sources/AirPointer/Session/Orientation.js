@@ -130,9 +130,15 @@ export class Grip {
    throw Error('Aim in a different direction. Return to center, then aim toward the top.');
   this[name]=axis;
  }
- point(q){
+ point(q,g=null,plane='upright'){
   if(!this.center||!this.right||!this.up)return null;
-  const v=this.relative(q),r=this.right,u=this.up,rr=dot(r,r),uu=dot(u,u),ru=dot(r,u),d=rr*uu-ru*ru;
+  let v;
+  if(plane==='flatTilt'&&Array.isArray(g)&&g.length===3&&norm(g)>.5){
+   v=cross(unit(g),this.gravity||[0,0,1]);
+  }else{
+   v=this.relative(q);
+  }
+  const r=this.right,u=this.up,rr=dot(r,r),uu=dot(u,u),ru=dot(r,u),d=rr*uu-ru*ru;
   const x=(dot(v,r)*uu-dot(v,u)*ru)/d,y=(dot(v,u)*rr-dot(v,r)*ru)/d;
   return [Math.max(0,Math.min(1,.5+x/2)),Math.max(0,Math.min(1,.5-y/2))];
  }

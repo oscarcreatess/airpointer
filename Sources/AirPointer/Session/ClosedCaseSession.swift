@@ -187,13 +187,14 @@ final class ClosedCaseMotion {
         if lastException != nil{return nil}
         return value?.toBool()
     }
-    func feed(_ rows:[[Double]])->[String:Any]?{
+    func feed(_ rows:[[Double]],plane:PointingPlane = .upright)->[String:Any]?{
         context.setObject(rows,forKeyedSubscript:"rawRows" as NSString)
+        context.setObject(plane.rawValue,forKeyedSubscript:"rawPlane" as NSString)
         return run("""
         for(const row of rawRows)rawFusion.feed(row);
         ({ready:rawFusion.ready,generation:rawFusion.generation,measured:rawFusion.measured,
           gyro:rawFusion.last[12] || {},accel:rawFusion.last[11] || {},g:rawFusion.accel&&rawFusion.accel.vector,
-          point:rawGrip.point(rawFusion.q),q:rawFusion.q,edges:rawGrip.edges!==null})
+          point:rawGrip.point(rawFusion.q,rawFusion.accel&&rawFusion.accel.vector,rawPlane),q:rawFusion.q,edges:rawGrip.edges!==null})
         """)?.toDictionary() as? [String:Any]
     }
 }
@@ -404,12 +405,16 @@ func runClosedCaseNativeChecks() throws {
     dropped.evaluateScript("""
     var saved={right:[0.3,0,0],up:[0,0.3,0],gravity:[0,0,1],target_sha256:'x'},grip=new Grip(saved);
     var edges={kept:grip.recenter([1,0,0,0],[0,0,1]),center:grip.point([1,0,0,0]),right:grip.point([Math.cos(.075),Math.sin(.075),0,0]),
+      swivelRight:grip.point([Math.cos(.075),Math.sin(.075),0,0],[0,0,1],'flatSwivel'),
+      tiltCenter:grip.point([1,0,0,0],[0,0,1],'flatTilt'),
+      tiltRight:grip.point([1,0,0,0],[0,0.15,Math.sqrt(1-0.0225)],'flatTilt'),
       parallel:new Grip({right:[0.3,0,0],up:[0.3,0.01,0],gravity:[0,0,1]}).edges===null,
       turned:new Grip(saved).recenter([Math.SQRT1_2,Math.SQRT1_2,0,0],[0,0,1]),fresh:new Grip().edges===null};
     """)
     let edges=dropped.evaluateScript("edges")?.toDictionary() as? [String:Any]
     func near(_ value:Any?,_ expected:[Double])->Bool{(value as? [Double]).map{zip($0,expected).allSatisfy{abs($0-$1)<1e-6} && $0.count==2} ?? false}
     guard dropped.exception==nil,edges?["kept"] as? Bool==true,near(edges?["center"],[0.5,0.5]),near(edges?["right"],[0.75,0.5]),
+          near(edges?["swivelRight"],[0.75,0.5]),near(edges?["tiltCenter"],[0.5,0.5]),near(edges?["tiltRight"],[0.75,0.5]),
           edges?["parallel"] as? Bool==true,edges?["turned"] as? Bool==false,edges?["fresh"] as? Bool==true else{
         throw LessonError.message("Saved grip edges must recenter with one pose and refuse a different hold.")
     }
@@ -437,6 +442,10 @@ func runClosedCaseNativeChecks() throws {
     let firstRun=try ClosedCaseMotion.make();let setsDown=firstRun.needsFirstOffset
     firstRun.loadCalibration(["bias":[0.1,0.1,0.1]])
     guard setsDown,!firstRun.needsFirstOffset else{throw LessonError.message("Only a case with no saved offset should be set down first.")}
+    guard firstRun.feed([[1,11,1000000,1.0,0,0,100000],[2,12,1001000,1.0,0,0,0]],plane:.flatSwivel) != nil,
+          firstRun.feed([[3,11,1020000,1.02,0,0,100000],[4,12,1021000,1.02,0,0,0]],plane:.flatTilt) != nil else{
+        throw LessonError.message("Repeated motion feeds across pointing planes must not fail.")
+    }
     guard !closedCaseUpright([0,0,1],closed:[0,0,1],held:nil),closedCaseUpright([1,0,0],closed:[0,0,1],held:nil),
           !closedCaseUpright([0.5,0,0.87],closed:[0,0,1],held:nil),closedCaseUpright([0.656,0,0.755],closed:[0,0,1],held:nil),closedCaseUpright([0.9,0.1,0.42],closed:[0.9,0.1,0.42],held:[1,0,0]),
           !closedCaseUpright([0,0,1],closed:[0,0,1],held:[1,0,0]) else{
@@ -538,6 +547,14 @@ final class ClosedCaseSession: NSObject {
     private let bluetooth=ClosedCaseBluetoothAccess()
     private var resumeAfterDrop=false
     var speed=1.0,clickSound=true
+    var plane=PointingPlane.upright{
+        didSet{
+            guard plane != oldValue else{return}
+            if !plane.requiresTurnUpright && confirmed{turned=true}
+            else if plane.requiresTurnUpright && confirmed && !calibrated{turned=false;uprightSince=nil}
+            changed()
+        }
+    }
     var pointsWhenReady=false,usesNotch=false
     var centersItself:Bool{pointsWhenReady && centerOnly}
     var preparingConnection:Bool{preparing && lidWatcher==nil}
@@ -591,6 +608,7 @@ final class ClosedCaseSession: NSObject {
     func resumeCursor(){toggleCursor()}
     func recenter(){if calibrated && inputReady{let resume=enabled;setPose();if resume{toggleCursor()}}else{changed()}}
     func recalibrate(){pause();hasPointed=false;calibrated=false;motion?.resetGrip();changed()}
+    func clearSavedGrip(){cachedGrip=nil;try? FileManager.default.removeItem(at:gripURL);if isActive{recalibrate()}}
     func pause(_ reason:String="Paused"){pauseReason=reason;enabled=false;resumeAfterDrop=false;changed()}
     func disconnect(then done:(()->Void)?=nil){
         if let done{if isActive{afterEnd.append(done)}else{done();return}}
@@ -630,7 +648,7 @@ final class ClosedCaseSession: NSObject {
             try Data("closed_confirmed\n".utf8).write(to:capture.appendingPathComponent("phase.txt"),options:.atomic)
             step("lid closed");confirmed=true;ready=false
             motion?.resetGrip(keepingEdges:true);calibrated=false;smooth=CGPoint(x:0.5,y:0.5);setAim(smooth)
-            turned=false;uprightSince=nil;settle=nil
+            turned = !plane.requiresTurnUpright;uprightSince=nil;settle=nil
             closedGravity=motion?.accelVector
             heldGravity=motion?.gripGravity
             pointerFilter=ClosedCasePointerFilter()
@@ -840,7 +858,7 @@ final class ClosedCaseSession: NSObject {
                     }
                 }
             }
-            guard let result=motion.feed(rows),
+            guard let result=motion.feed(rows,plane:plane),
                   let gyro=result["gyro"] as? [String:Any],let accel=result["accel"] as? [String:Any],
                   let host=gyro["host"] as? Double,let stamp=gyro["stamp"] as? Double,
                   let accelHost=accel["host"] as? Double else{return}
@@ -850,6 +868,7 @@ final class ClosedCaseSession: NSObject {
             // The turn counts from where the case was set down. A table can match the saved grip's tilt,
             // so that shortcut is off and the case has to really move.
             if motion.needsFirstOffset{closedGravity=nil;heldGravity=nil;uprightSince=nil}
+            else if confirmed,!turned,!plane.requiresTurnUpright{turned=true}
             else if confirmed,!turned,let g=result["g"] as? [Double],g.count==3 {
                 if closedGravity==nil{closedGravity=g}
                 if let closedGravity,closedCaseUpright(g,closed:closedGravity,held:heldGravity){
@@ -901,7 +920,7 @@ final class ClosedCaseSession: NSObject {
     private func setPose(){
         guard connected,confirmed,let motion,motion.fusionReady else{return}
         pause()
-        _=motion.run("rawGrip.center=[...rawFusion.q]")
+        _=motion.run("rawGrip.center=[...rawFusion.q];if(rawFusion.accel&&rawFusion.accel.vector)rawGrip.gravity=unit(rawFusion.accel.vector);")
         if motion.lastException != nil{feedError=nil;return}
         smooth=CGPoint(x:0.5,y:0.5);pointerFilter=ClosedCasePointerFilter();setAim(smooth);readStatus()
         saveCalibration()

@@ -12,7 +12,7 @@ func runHomeChecks()throws {
     func content()->[NSView]{home.window.contentView!.layoutSubtreeIfNeeded();return visible(home.window.contentView!)}
     func words()->String{content().compactMap{$0 as? NSTextField}.map(\.stringValue).joined(separator:" ")}
     func primary()->RemoteButton{content().compactMap{$0 as? RemoteButton}.first{$0.style == .primary}!}
-    // The closed case is the only pointer: no mode choice, no microphone and no Gestures or Practice to find.
+    // The closed case is the only pointer: no microphone and no Gestures or Practice to find.
     func retired(_ views:[NSView],_ surface:String)throws{
         let text=views.flatMap{view->[String] in
             var parts=[view.accessibilityLabel() ?? "",view.toolTip ?? "",(view as? NSTextField)?.stringValue ?? "",(view as? NSButton)?.title ?? ""]
@@ -78,7 +78,7 @@ func runHomeChecks()throws {
     let ringArt=CaseStepView()
     try require(ringArt.holdProgress==nil,"The case art starts with a ring")
     let ringSetup=SetupAssistant()
-    ringSetup.go(to:1);ringSetup.update(SetupState(link:.holdStill,accessibilityTrusted:true,holdProgress:0.5))
+    ringSetup.go(to:2);ringSetup.update(SetupState(link:.holdStill,accessibilityTrusted:true,holdProgress:0.5))
     func setupRing()->CGFloat?{descendants(ringSetup.window.contentView!).compactMap{$0 as? CaseStepView}.compactMap(\.holdProgress).first}
     try require(setupRing()==0.5,"Setup didn’t show the hold ring")
     ringSetup.update(SetupState(link:.connected,accessibilityTrusted:true))
@@ -180,15 +180,16 @@ func runHomeChecks()throws {
     home.updateControl(phase:.paused("Your AirPods disconnected."),inputsReady:true)
     try require(words().contains("Your AirPods disconnected."),"A pause reason was not shown")
 
-    // Setup is Allow, Connect, Calibrate and Tap, with no mode to pick. Tap listens by itself, can be skipped, and finishes it.
+    // Setup is Allow, Style, Connect, Calibrate and Tap. Tap listens by itself, can be skipped, and finishes it.
     let assistant=SetupAssistant();defer{assistant.window.orderOut(nil)}
     func setupViews()->[NSView]{assistant.window.contentView!.layoutSubtreeIfNeeded();return visible(assistant.window.contentView!)}
-    for (link,step) in [(SetupLink.idle,0),(.idle,1),(.openLid,1),(.connecting,1),(.closeLid,1),(.turnUpright,1),(.holdStill,1),(.connected,1),(.connected,2)] {
+    for (link,step) in [(SetupLink.idle,0),(.idle,1),(.idle,2),(.openLid,2),(.connecting,2),(.closeLid,2),(.turnUpright,2),(.holdStill,2),(.connected,2),(.connected,3)] {
         assistant.update(SetupState(link:link,accessibilityTrusted:step>0));assistant.go(to:step)
         try retired(descendants(assistant.window.contentView!),"Setup (\(link), step \(step+1))")
+        try require(setupViews().compactMap{$0 as? RemoteButton}.filter{$0.style == .primary}.count<=1,"Setup step \(step+1) showed more than one primary action")
     }
     assistant.update(SetupState());assistant.go(to:0)
-    try require(setupViews().contains{$0.accessibilityLabel()?.hasPrefix("Step 1 of 4, Allow") == true},"Setup should start by allowing control")
+    try require(setupViews().contains{$0.accessibilityLabel()?.hasPrefix("Step 1 of 5, Allow") == true},"Setup should start by allowing control")
     // The guide sits on System Settings' largest ordinary window, above its + and − buttons and clear of its sidebar.
     func window(_ owner:Int,_ layer:Int,_ x:Int,_ y:Int,_ width:Int,_ height:Int)->[String:Any]{
         [kCGWindowOwnerPID as String:owner,kCGWindowLayer as String:layer,kCGWindowBounds as String:["X":x,"Y":y,"Width":width,"Height":height]]
@@ -201,15 +202,20 @@ func runHomeChecks()throws {
     try require(settingsFrame!.contains(guide) && guide.minX>=settingsFrame!.minX+260 && guide.minY>=settingsFrame!.minY+32,"The guide should sit above the + and − buttons, clear of the sidebar")
     let allowed=SetupState(accessibilityTrusted:true),linked=SetupState(link:.connected,accessibilityTrusted:true)
     let aiming=SetupState(link:.connected,accessibilityTrusted:true,calibrating:true),aimed=SetupState(link:.connected,accessibilityTrusted:true,calibrated:true)
-    try require(SetupAssistant.following(0,from:SetupState(),to:allowed)==1,"Allowing control should lead on to Connect")
-    try require(SetupAssistant.following(1,from:allowed,to:linked)==2,"Connecting should lead on to Calibrate")
-    try require(SetupAssistant.following(1,from:allowed,to:aimed)==3,"Connecting with saved edges should lead on to the tap")
-    try require(SetupAssistant.following(2,from:aiming,to:aimed)==3,"Calibrating should lead on to the tap")
-    try require(SetupAssistant.following(0,from:allowed,to:allowed)==nil && SetupAssistant.following(1,from:linked,to:linked)==nil && SetupAssistant.following(2,from:aimed,to:aimed)==nil && SetupAssistant.following(3,from:linked,to:aimed)==nil,"Coming back to a finished step shouldn’t move on by itself")
-    var finished=0,listening=0,stoppedListening=0,choosing=0
+    try require(SetupAssistant.following(0,from:SetupState(),to:allowed)==1,"Allowing control should lead on to Style")
+    try require(SetupAssistant.following(2,from:allowed,to:linked)==3,"Connecting should lead on to Calibrate")
+    try require(SetupAssistant.following(2,from:allowed,to:aimed)==4,"Connecting with saved edges should lead on to the tap")
+    try require(SetupAssistant.following(3,from:aiming,to:aimed)==4,"Calibrating should lead on to the tap")
+    try require(SetupAssistant.following(0,from:allowed,to:allowed)==nil && SetupAssistant.following(2,from:linked,to:linked)==nil && SetupAssistant.following(3,from:aimed,to:aimed)==nil && SetupAssistant.following(4,from:linked,to:aimed)==nil,"Coming back to a finished step shouldn’t move on by itself")
+    var finished=0,listening=0,stoppedListening=0,choosing=0,chosenPlane:PointingPlane?
     assistant.onFinish={finished+=1};assistant.onLearnTap={listening+=1};assistant.onStopLearningTap={stoppedListening+=1};assistant.onChooseAirPods={choosing+=1}
+    assistant.onChoosePlane={chosenPlane=$0}
     func setupSays(_ words:String)->Bool{setupViews().contains{($0 as? NSTextField)?.stringValue.contains(words)==true}}
     assistant.go(to:1);assistant.update(SetupState(link:.idle,accessibilityTrusted:true))
+    try require(setupSays("Choose how to point"),"Setup’s Style step should explain the pointing styles")
+    setupViews().compactMap{$0 as? RemoteButton}.first{$0.title==PointingPlane.flatTilt.shortTitle}?.performClick(nil)
+    try require(chosenPlane == .flatTilt && setupSays(PointingPlane.flatTilt.subtitle),"Picking a style in setup should update the plane and its description")
+    assistant.go(to:2);assistant.update(SetupState(link:.idle,accessibilityTrusted:true))
     try require(setupSays("diagnostic data") && setupSays("during a call"),"Setup should say what connecting does before anyone connects")
     assistant.update(SetupState(link:.idle,problem:ClosedCaseAirPods.Choice.several.failure,accessibilityTrusted:true))
     try require(setupSays("diagnostic data") && setupSays("Choose which to use"),"A problem shouldn’t hide what connecting does")
@@ -217,24 +223,24 @@ func runHomeChecks()throws {
     try require(choose?.title=="Choose AirPods…","Several pairs should offer a choice right in setup")
     choose?.performClick(nil)
     try require(choosing==1,"The choice should open from setup’s button")
-    assistant.update(SetupState(link:.connected,accessibilityTrusted:true,calibrated:true));assistant.go(to:2)
+    assistant.update(SetupState(link:.connected,accessibilityTrusted:true,calibrated:true));assistant.go(to:3)
     try require(setupViews().compactMap{$0 as? RemoteButton}.first{$0.style == .primary}?.title=="Continue","Calibrate should lead on to the tap")
-    assistant.go(to:3)
+    assistant.go(to:4)
     try require(listening==1 && !setupViews().compactMap{$0 as? RemoteButton}.filter{!$0.isHidden && $0.title=="Skip for Now"}.isEmpty,"The tap step should listen by itself and offer a skip")
     assistant.update(SetupState(link:.idle,accessibilityTrusted:true,calibrated:true))
     try require(stoppedListening==1,"Losing the case on the tap step should stop listening")
     assistant.update(SetupState(link:.connected,accessibilityTrusted:true,calibrated:true))
     try require(listening==2,"Getting the case back on the tap step should listen again")
-    assistant.go(to:2)
+    assistant.go(to:3)
     try require(stoppedListening==2,"Leaving the tap step should stop listening")
     assistant.update(SetupState(link:.connected,accessibilityTrusted:true,calibrated:true,taps:SetupTaps(heard:3,learned:true)));assistant.go(to:9)
     let finish=setupViews().compactMap{$0 as? RemoteButton}.first{$0.style == .primary}
-    try require(assistant.step==3 && listening==2 && finish?.title=="Finish" && setupViews().contains{$0.accessibilityLabel()?.hasPrefix("Step 4 of 4") == true},"Setup went past the tap step, or the tap step didn’t finish it")
+    try require(assistant.step==4 && listening==2 && finish?.title=="Finish" && setupViews().contains{$0.accessibilityLabel()?.hasPrefix("Step 5 of 5") == true},"Setup went past the tap step, or the tap step didn’t finish it")
     try retired(setupViews(),"Setup’s last step")
     finish?.performClick(nil)
     try require(finished==1,"Finish did not end setup")
     // Finish and Skip for Now both wait for Accessibility, since the pointer can't move without it.
-    assistant.update(SetupState(link:.connected,calibrated:true,taps:SetupTaps(heard:3,learned:true)));assistant.go(to:3)
+    assistant.update(SetupState(link:.connected,calibrated:true,taps:SetupTaps(heard:3,learned:true)));assistant.go(to:4)
     setupViews().compactMap{$0 as? RemoteButton}.first{$0.style == .primary}?.performClick(nil)
     try require(finished==1 && assistant.step==0,"Setup finished without Accessibility")
 
@@ -244,7 +250,7 @@ func runHomeChecks()throws {
     defer{for key in firstRunKeys{if let value=firstRunPrior[key]{defaults.set(value,forKey:key)}else{defaults.removeObject(forKey:key)}}}
     for key in firstRunKeys{defaults.removeObject(forKey:key)}
     let app=App();defer{app.setup?.window.orderOut(nil);app.home?.window.orderOut(nil)}
-    try require(app.showConnectEffectsFirst() && app.setup?.window.isVisible == true && app.setup?.step == (AXIsProcessTrusted() ? 1:0),"A first connection should open setup’s Connect step")
+    try require(app.showConnectEffectsFirst() && app.setup?.window.isVisible == true && app.setup?.step == (AXIsProcessTrusted() ? 2:0),"A first connection should open setup’s Connect step")
     func appWindow(_ text:String,on window:NSWindow?)->Bool{descendants(window!.contentView!).contains{($0 as? NSTextField)?.stringValue.contains(text)==true}}
     try require(appWindow("diagnostic data",on:app.setup?.window) || !AXIsProcessTrusted(),"The first connection should show what a session does")
     app.reportEnded("Reason during setup.",fromNotch:false)
@@ -350,7 +356,8 @@ func runHomeChecks()throws {
         setup.update(SetupState(link:.idle));setup.go(to:0);try windowSnapshot("setup-allow",setup.window,.aqua)
         try windowSnapshot("accessibility-guide",AccessibilityGuide.previewWindow(),.aqua)
         try windowSnapshot("accessibility-guide-dark",AccessibilityGuide.previewWindow(),.darkAqua)
-        setup.go(to:1);try windowSnapshot("setup-connect",setup.window,.aqua)
+        setup.go(to:1);try windowSnapshot("setup-style",setup.window,.aqua)
+        setup.go(to:2);try windowSnapshot("setup-connect",setup.window,.aqua)
         setup.update(SetupState(link:.idle,problem:ClosedCaseAirPods.helperFailure(30,stopping:false)));try windowSnapshot("setup-connect-problem",setup.window,.aqua)
         setup.update(SetupState(link:.closeLid));try windowSnapshot("setup-close-lid",setup.window,.darkAqua)
         setup.update(SetupState(link:.turnUpright));try windowSnapshot("setup-turn",setup.window,.aqua)
@@ -365,7 +372,7 @@ func runHomeChecks()throws {
             }
             try snapshot(name,row)
         }
-        setup.go(to:2);try windowSnapshot("setup-calibrate",setup.window,.darkAqua)
+        setup.go(to:3);try windowSnapshot("setup-calibrate",setup.window,.darkAqua)
         // The notch at each step from fn ⌃ to pointing, hanging from a 14-inch notch over a menu bar.
         final class Wallpaper:NSView{override func draw(_ dirtyRect:NSRect){NSColor(srgbRed:0.36,green:0.42,blue:0.52,alpha:1).setFill();bounds.fill();NSColor(white:1,alpha:0.18).setFill();NSRect(x:0,y:bounds.height-32,width:bounds.width,height:32).fill()}}
         let notchSteps:[(String,NotchContent,Double)]=[("open-lid",NotchContent.connecting(.openLid,preparing:false)!,1.2),("looking",NotchContent.connecting(.connecting,preparing:false)!,0.8),
@@ -381,7 +388,7 @@ func runHomeChecks()throws {
         try snapshot("notch-steps",notchSheet,nil)
         setup.update(SetupState(link:.connected,accessibilityTrusted:true,calibrated:true));try windowSnapshot("setup-calibrated",setup.window,.aqua)
         setup.update(SetupState(link:.connected,accessibilityTrusted:true,calibrated:true,taps:SetupTaps(heard:2,listening:true)))
-        setup.go(to:3);try windowSnapshot("setup-tap",setup.window,.darkAqua)
+        setup.go(to:4);try windowSnapshot("setup-tap",setup.window,.darkAqua)
         setup.update(SetupState(link:.connected,accessibilityTrusted:true,calibrated:true,taps:SetupTaps(heard:1,mixed:true,failed:true)));try windowSnapshot("setup-tap-failed",setup.window,.aqua)
         setup.update(SetupState(link:.connected,accessibilityTrusted:true,calibrated:true,taps:SetupTaps(heard:3,learned:true)));try windowSnapshot("setup-finish",setup.window,.aqua)
         let tapTest=TapTestWindow{nil};try windowSnapshot("tap-test",tapTest.window,.aqua)

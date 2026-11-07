@@ -150,8 +150,8 @@ extension App {
         }
     }
     private func applyPointerSettings(_ value:PointerSettingsState,to session:ClosedCaseSession){
-        session.speed=value.speed;session.clickSound=value.clickSound;session.tapDirection=value.tapDirection
-        session.screenIndex=value.screen
+        session.speed=value.speed;session.clickSound=value.clickSound;session.plane=value.plane
+        session.tapDirection=value.tapDirection;session.screenIndex=value.screen
     }
     func applyHomePointerSettings(_ value:PointerSettingsState){
         // Another pair is a different connection, so a session on the old one ends.
@@ -161,13 +161,20 @@ extension App {
         }
         var next=value;next.clampSpeed()
         let screenChanged=pointerSettings.screen != next.screen
+        let planeChanged=pointerSettings.plane != next.plane
         pointerSettings.speed=next.speed
         pointerSettings.clickSound=next.clickSound
+        pointerSettings.plane=next.plane
         if screenChanged,NSScreen.screens.indices.contains(next.screen){pointerSettings.screen=next.screen;pointerSettings.screenID=NSScreen.screens[next.screen].displayID}
         pointerSettings.persist()
-        if screenChanged{pause()}
+        if screenChanged || planeChanged{pause()}
         if let session=closedCaseSession{applyPointerSettings(pointerSettings,to:session)}
+        if planeChanged{
+            try? FileManager.default.removeItem(at:airPointerDataFolder.appendingPathComponent("closed-case-grip.json"))
+            closedCaseSession?.clearSavedGrip()
+        }
         home?.updatePointerSettings(homePointerSettings())
+        refreshSetup()
     }
     @objc func openHomeSettings(){showHome();showHomeSettings()}
     @objc func homeMenuControl(){showHome();homeControlAction()}
@@ -181,7 +188,7 @@ extension App {
     // Setup's Connect step says what a session does, so every way to connect goes there until someone has pressed it.
     func showConnectEffectsFirst()->Bool{
         guard needsSetup,!UserDefaults.standard.bool(forKey:"connectEffectsSeen") else{return false}
-        showSetup();return true
+        showSetup();setup?.go(to:AXIsProcessTrusted() ? 2:0);return true
     }
     @objc func showSetup(){
         if setup==nil {
@@ -190,6 +197,11 @@ extension App {
             assistant.onConnect={ [weak self] in
                 UserDefaults.standard.set(true,forKey:"connectEffectsSeen")
                 self?.startClosedPointerSession()
+            }
+            assistant.onChoosePlane={ [weak self] plane in
+                guard let self else{return}
+                var value=self.homePointerSettings();value.plane=plane
+                self.applyHomePointerSettings(value)
             }
             assistant.onChooseAirPods={ [weak self] in self?.chooseAirPods() }
             assistant.onLidClosed={ [weak self] in self?.closedCaseSession?.confirmLidClosed() }
@@ -228,7 +240,7 @@ extension App {
         startClosedPointerSession()
     }
     @objc func runSetupAgain(){pause();showSetup();setup?.go(to:AXIsProcessTrusted() ? 1:0)}
-    func teachTap(){pause();showSetup();setupTaps=SetupTaps();refreshSetup();setup?.go(to:3)}
+    func teachTap(){pause();showSetup();setupTaps=SetupTaps();refreshSetup();setup?.go(to:4)}
     private func learnTap(){
         setupTaps=SetupTaps(listening:true)
         closedCaseSession?.learnTaps{ [weak self] event in
@@ -259,6 +271,7 @@ extension App {
         let problem=stage == .off ? session?.endReason:nil
         setup.update(SetupState(link:link,problem:problem,
                                 accessibilityTrusted:AXIsProcessTrusted(),
+                                plane:pointerSettings.plane,
                                 calibrating:calibrator.isActive,
                                 calibrated:session?.calibrated == true,
                                 holdProgress:session?.holdProgress ?? 0,

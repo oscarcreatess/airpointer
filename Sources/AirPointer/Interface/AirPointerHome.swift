@@ -5,6 +5,35 @@ import AppKit
 enum ClosedCaseStep:Equatable {case openLid,closeLid,turnUpright,holdStill,calibrate,recenter}
 enum HomeControlPhase:Equatable {case needsInputs,connecting,needsAccessibility,ready,running,paused(String),closedCase(ClosedCaseStep)}
 
+enum PointingPlane:String,CaseIterable,Equatable {
+    case upright
+    case flatSwivel
+    case flatTilt
+
+    var title:String {
+        switch self {
+        case .upright:return "Upright (vertical & lateral)"
+        case .flatSwivel:return "Flat swivel + tilt"
+        case .flatTilt:return "Flat tilt-joystick"
+        }
+    }
+    var shortTitle:String {
+        switch self {
+        case .upright:return "Upright"
+        case .flatSwivel:return "Flat swivel"
+        case .flatTilt:return "Flat tilt"
+        }
+    }
+    var subtitle:String {
+        switch self {
+        case .upright:return "Hold the closed case upright and aim at the screen."
+        case .flatSwivel:return "Keep the case flat on your desk; swivel left/right and tilt forward/back."
+        case .flatTilt:return "Keep the case flat and rock it forward, back, left or right like a joystick."
+        }
+    }
+    var requiresTurnUpright:Bool {self == .upright}
+}
+
 extension NSScreen {
     // Stays the same across unplugging and reordering, unlike the place in NSScreen.screens.
     var displayID:String? {
@@ -24,12 +53,14 @@ struct PointerSettingsState:Equatable {
     var pair=0
     var speed=1.0
     var clickSound=true
+    var plane=PointingPlane.upright
     // The way this person's taps push the sensor, when setup learned one other than the usual.
     var tapDirection:[Double]?=nil
 
     // Slider legacy: 10…60 stored as pointerSensitivity; speed is that value / 25.
     private static let sensitivityKey="pointerSensitivity"
     private static let clickSoundKey="tapClickSound"
+    private static let planeKey="pointingPlane"
     private static let tapDirectionKey="tapDirection"
     private static let screenKey="pointerScreen"
     private static let screenIDKey="pointerScreenID"
@@ -45,6 +76,9 @@ struct PointerSettingsState:Equatable {
             value.speed=min(60,max(10,saved))/25
         }
         value.clickSound=UserDefaults.standard.object(forKey:clickSoundKey) as? Bool ?? true
+        if let raw=UserDefaults.standard.string(forKey:planeKey),let parsed=PointingPlane(rawValue:raw){
+            value.plane=parsed
+        }
         value.tapDirection=(UserDefaults.standard.array(forKey:tapDirectionKey) as? [Double]).flatMap{$0.count==3 ? $0:nil}
         if let saved=UserDefaults.standard.object(forKey:screenKey) as? Int{value.screen=max(0,saved)}
         value.screenID=UserDefaults.standard.string(forKey:screenIDKey)
@@ -56,6 +90,7 @@ struct PointerSettingsState:Equatable {
     func persist(){
         UserDefaults.standard.set(min(60,max(10,speed*25)),forKey:Self.sensitivityKey)
         UserDefaults.standard.set(clickSound,forKey:Self.clickSoundKey)
+        UserDefaults.standard.set(plane.rawValue,forKey:Self.planeKey)
         if let tapDirection{UserDefaults.standard.set(tapDirection,forKey:Self.tapDirectionKey)}else{UserDefaults.standard.removeObject(forKey:Self.tapDirectionKey)}
         UserDefaults.standard.set(screen,forKey:Self.screenKey)
         if let screenID{UserDefaults.standard.set(screenID,forKey:Self.screenIDKey)}else{UserDefaults.standard.removeObject(forKey:Self.screenIDKey)}
@@ -64,22 +99,18 @@ struct PointerSettingsState:Equatable {
 
 func runPointerSettingsChecks()throws {
     let defaults=UserDefaults.standard
-    let keys=["pointerSensitivity","tapClickSound","pointerScreen","pointerScreenID","tapDirection"]
+    let keys=["pointerSensitivity","tapClickSound","pointingPlane","pointerScreen","pointerScreenID","tapDirection"]
     let prior=Dictionary(uniqueKeysWithValues:keys.map{($0,defaults.object(forKey:$0))})
     defer{for key in keys{if let value=prior[key]{defaults.set(value,forKey:key)}else{defaults.removeObject(forKey:key)}}}
-    defaults.removeObject(forKey:"pointerSensitivity")
-    defaults.removeObject(forKey:"tapClickSound")
-    defaults.removeObject(forKey:"pointerScreen")
-    defaults.removeObject(forKey:"pointerScreenID")
-    defaults.removeObject(forKey:"tapDirection")
+    for key in keys{defaults.removeObject(forKey:key)}
     let fresh=PointerSettingsState.loadPersisted()
-    guard fresh.speed==1,fresh.clickSound,fresh.screen==0,fresh.screenID==nil,fresh.tapDirection==nil else{
-        throw LessonError.message("Default pointer settings should be speed 1, click sound on, screen 0.")
+    guard fresh.speed==1,fresh.clickSound,fresh.plane == .upright,fresh.screen==0,fresh.screenID==nil,fresh.tapDirection==nil else{
+        throw LessonError.message("Default pointer settings should be speed 1, click sound on, upright plane, screen 0.")
     }
-    var sample=PointerSettingsState(screen:1,screenID:"side",speed:1.4,clickSound:false,tapDirection:[0.6,0,-0.8])
+    var sample=PointerSettingsState(screen:1,screenID:"side",speed:1.4,clickSound:false,plane:.flatTilt,tapDirection:[0.6,0,-0.8])
     sample.clampSpeed();sample.persist()
     let loaded=PointerSettingsState.loadPersisted()
-    guard abs(loaded.speed-1.4)<1e-9,!loaded.clickSound,loaded.screen==1,loaded.screenID=="side",loaded.tapDirection==[0.6,0,-0.8] else{
+    guard abs(loaded.speed-1.4)<1e-9,!loaded.clickSound,loaded.plane == .flatTilt,loaded.screen==1,loaded.screenID=="side",loaded.tapDirection==[0.6,0,-0.8] else{
         throw LessonError.message("Pointer settings did not round-trip through UserDefaults.")
     }
     // The chosen display wherever it now sits; with it unplugged, a display that exists; with no choice, the same place.
@@ -94,7 +125,7 @@ func runPointerSettingsChecks()throws {
 
 // MARK: - Copy
 
-private struct HomeControlKey:Equatable {let phase:HomeControlPhase;let inputs:Bool}
+private struct HomeControlKey:Equatable {let phase:HomeControlPhase;let inputs:Bool;let plane:PointingPlane}
 
 private func hmCommand(_ phase:HomeControlPhase)->(title:String,hint:String?) {
     switch phase {
@@ -111,13 +142,13 @@ private func hmCommand(_ phase:HomeControlPhase)->(title:String,hint:String?) {
     case .closedCase(.recenter):return ("Recenter",nil)
     }
 }
-private func hmHero(_ phase:HomeControlPhase)->(String,String) {
+private func hmHero(_ phase:HomeControlPhase,plane:PointingPlane = .upright)->(String,String) {
     switch phase {
     case .needsInputs:return ("Connect your AirPods","Hold the closed case with both AirPods inside. Connect, then open the lid.")
     case .connecting:return ("Looking for your AirPods…","Keep the lid open for a moment.")
     case .needsAccessibility:return ("Allow control","Press Allow to open the Accessibility list, then drag AirPointer into it so it can move the pointer and click.")
-    case .ready:return ("Ready to point","Hold the closed case upright and aim at the screen.")
-    case .running:return ("Pointing","Aim with the case. Tap its front to click.")
+    case .ready:return ("Ready to point",plane == .upright ? "Hold the closed case upright and aim at the screen.":"Keep the closed case flat and aim at the screen.")
+    case .running:return ("Pointing",plane == .upright ? "Aim with the case. Tap its front to click.":"Aim with the case. Tap the case to click.")
     case .paused(let reason):return ("Paused",reason=="Paused" || reason.isEmpty ? "Resume when you’re ready.":reason)
     case .closedCase(.openLid):return ("Open the lid","AirPointer connects when you open it. Keep both AirPods inside.")
     case .closedCase(.closeLid):return ("Close the lid","Keep both AirPods inside. AirPointer goes on by itself, or press Return.")
@@ -314,13 +345,13 @@ final class AirPointerHome:NSObject,NSWindowDelegate {
 
     // Called about 12 times a second: returns early unless something visible changed.
     func updateControl(phase:HomeControlPhase,inputsReady:Bool) {
-        let key=HomeControlKey(phase:phase,inputs:inputsReady)
+        let key=HomeControlKey(phase:phase,inputs:inputsReady,plane:pointerSettings.plane)
         guard key != controlKey else{return}
         let announce=controlKey != nil && phase != self.phase
         controlKey=key
         self.phase=phase;self.inputsReady=inputsReady
         pointerPage.render()
-        if announce{NSAccessibility.post(element:window,notification:.announcementRequested,userInfo:[.announcement:hmHero(phase).0,.priority:NSAccessibilityPriorityLevel.high.rawValue])}
+        if announce{NSAccessibility.post(element:window,notification:.announcementRequested,userInfo:[.announcement:hmHero(phase,plane:pointerSettings.plane).0,.priority:NSAccessibilityPriorityLevel.high.rawValue])}
     }
 
     func updateHold(_ progress:CGFloat?){pointerPage.updateHold(progress)}
@@ -445,7 +476,7 @@ private final class PointerPage:NSObject {
 
     func render() {
         let phase=home.phase
-        let hero=hmHero(phase),command=hmCommand(phase)
+        let hero=hmHero(phase,plane:home.pointerSettings.plane),command=hmCommand(phase)
         rkSetText(title,hero.0);rkSetText(subtitle,hero.1)
         if primary.title != command.title{primary.title=command.title}
         if primary.hint != command.hint{primary.hint=command.hint}
@@ -513,6 +544,7 @@ private final class SettingsPage:NSObject {
     let view:NSScrollView
     private let screens=NSPopUpButton()
     private let pairs=NSPopUpButton()
+    private let planes=NSPopUpButton()
     private let speed=NSSlider(value:1,minValue:0.4,maxValue:2.4,target:nil,action:nil)
     private let clickSound=InkSwitch()
     private let shortcutControl=PointerShortcutControl()
@@ -531,6 +563,10 @@ private final class SettingsPage:NSObject {
         column.addHeader("AirPods")
         pairs.target=self;pairs.action=#selector(changed(_:));pairs.setAccessibilityLabel("AirPods to connect to")
         column.addFull(hmSettingRow("Connect to",nil,pairs))
+        column.addHeader("Pointing")
+        planes.addItems(withTitles:PointingPlane.allCases.map(\.title))
+        planes.target=self;planes.action=#selector(changed(_:));planes.setAccessibilityLabel("How to point")
+        column.addFull(hmSettingRow("How to point","Hold the case upright, swivel it flat on a desk, or tilt it flat like a joystick.",planes))
         column.addHeader("Screen")
         screens.target=self;screens.action=#selector(changed(_:));screens.setAccessibilityLabel("Screen to control")
         column.addFull(hmSettingRow("Point at",nil,screens))
@@ -569,6 +605,7 @@ private final class SettingsPage:NSObject {
         let pairTitles=state.pairs.isEmpty ? ["No AirPods Pro found"]:state.pair<0 ? ["Choose your AirPods"]+state.pairs:state.pairs
         if pairs.itemTitles != pairTitles{pairs.removeAllItems();pairs.addItems(withTitles:pairTitles)}
         pairs.selectItem(at:max(0,state.pair));pairs.isEnabled=state.pairs.count>1
+        if let planeIndex=PointingPlane.allCases.firstIndex(of:state.plane){planes.selectItem(at:planeIndex)}
         speed.doubleValue=state.speed
         rkSetText(speedValue,String(format:"%.1f×",state.speed))
         speed.setAccessibilityValueDescription(String(format:"%.1f times normal speed",state.speed))
@@ -577,6 +614,8 @@ private final class SettingsPage:NSObject {
     @objc private func changed(_ sender:Any?) {
         var value=home.pointerSettings
         value.screen=max(0,screens.indexOfSelectedItem);value.speed=(speed.doubleValue*10).rounded()/10;value.clickSound=clickSound.isOn
+        let planeIndex=planes.indexOfSelectedItem
+        if PointingPlane.allCases.indices.contains(planeIndex){value.plane=PointingPlane.allCases[planeIndex]}
         if !value.pairs.isEmpty{value.pair=pairs.indexOfSelectedItem-(value.pair<0 ? 1:0)}
         home.changePointerSettings(value)
     }

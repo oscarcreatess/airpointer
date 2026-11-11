@@ -318,6 +318,7 @@ extension App {
         case .ready:if was == .pointing{notch.show(.paused,for:1.6)}else{notch.collapse()}
         // The dots take over: a first calibration, or the case held another way than the saved edges.
         case .calibrating where !session.centersItself:notch.collapse()
+        case .closeLid where session.usesHeadphoneMotion:notch.show(NotchContent(step:.close,title:"Close the lid",detail:"Then choose Lid Closed in AirPointer’s menu.",progress:1))
         case .openLid where session.opensLidFirst:notch.show(.lost)
         case .connecting where session.opensLidFirst && session.preparingConnection:notch.show(.lost)
         default:if let content=NotchContent.connecting(stage,preparing:session.preparingConnection){notch.show(content)}

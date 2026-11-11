@@ -235,6 +235,11 @@ final class TapTestWindow:NSObject,NSWindowDelegate {
     }
     private func save(_ run:TapTestRun){
         var record=run.record
+        // H1 uses separate thresholds, so statistics must record them instead of H2 defaults.
+        if session?.usesHeadphoneMotion == true{
+            record["minimumAlignment"]=HeadphoneTapTuning.minimumAlignment
+            record["headphoneMotion"]=true
+        }
         record["date"]=ISO8601DateFormatter().string(from:Date());record["session"]=session?.captureFolder?.lastPathComponent ?? ""
         guard var line=try? JSONSerialization.data(withJSONObject:record,options:.sortedKeys) else{return}
         line.append(0x0A)

@@ -29,6 +29,7 @@ struct ClosedCaseTapDetector {
     fileprivate struct Sample{let t:Double;let a:SIMD3<Double>;let w:SIMD3<Double>}
     // The way a finger on the front pushes this case's sensor, learned in setup if it isn't tapDirection.
     var direction=Self.tapDirection
+    var lowSampleRate=false
     private var recent:[Sample]=[],rotation:(t:Double,w:SIMD3<Double>)?
     private var lastTap = -Double.infinity,tapPeak=0.0,runFrom = -Double.infinity,steadyUntil:Double?
     // Jolts that didn't click, for the session log. The reader empties it.
@@ -67,30 +68,33 @@ struct ClosedCaseTapDetector {
     private mutating func step(_ s:Sample)->[Event]{
         var events:[Event]=[]
         if let steadyUntil,s.t>=steadyUntil{self.steadyUntil=nil;events.append(.release)}
-        guard let before=recent.last(where:{s.t-$0.t>=Self.spikeOver}) ?? recent.first,s.t-before.t<=Self.spikeGap else{return events}
-        let spike=s.a-before.a,size=length(spike),along=(spike*direction).sum()
-        if s.t-lastTap<=Self.peakWithin{tapPeak=max(tapPeak,along)}
-        guard s.t-lastTap>=Self.fastRefractory,size>=Self.softJolt else{return events}
-        guard along>=size*Self.minimumAlignment else{
+        guard let before=recent.last(where:{s.t-$0.t>=Self.spikeOver}) ?? recent.first,s.t-before.t<=(lowSampleRate ? HeadphoneTapTuning.spikeGap:Self.spikeGap) else{return events}
+        let spike=s.a-before.a,size=length(spike),projection=(spike*direction).sum()
+        // Low-rate sampling may capture only the rebound peak, so H1 uses the calibrated axis and a longer refractory period to suppress duplicate clicks.
+        let along=lowSampleRate ? abs(projection):projection
+        if s.t-lastTap<=(lowSampleRate ? HeadphoneTapTuning.peakWithin:Self.peakWithin){tapPeak=max(tapPeak,along)}
+        guard s.t-lastTap>=(lowSampleRate ? HeadphoneTapTuning.fastRefractory:Self.fastRefractory),size>=Self.softJolt else{return events}
+        guard along>=size*(lowSampleRate ? HeadphoneTapTuning.minimumAlignment:Self.minimumAlignment) else{
             // The rebound of any jolt points backwards, so only forward ones say anything about a tap.
             if size>=Self.jolt,along>0{ignore(s.t,size,String(format:"not on the front, alignment %.2f, jolt %.2f g",along/size,size))}
             return events
         }
-        guard along>=Self.jolt else{ignore(s.t,along,String(format:"too soft, %.2f g",along));return events}
-        let lead=rotations(from:s.t-Self.leadIn,to:s.t-Self.impactFrom).max(),justBefore=rotations(from:s.t-Self.repeatLeadIn,to:s.t-Self.impactFrom).max()
+        guard along>=(lowSampleRate ? HeadphoneTapTuning.jolt:Self.jolt) else{ignore(s.t,along,String(format:"too soft, %.2f g",along));return events}
+        let impactFrom=lowSampleRate ? HeadphoneTapTuning.impactFrom:Self.impactFrom
+        let lead=rotations(from:s.t-Self.leadIn,to:s.t-impactFrom).max(),justBefore=rotations(from:s.t-Self.repeatLeadIn,to:s.t-impactFrom).max()
         // A case turning a little is often about to be moved, so a tap then has to be firmer and more exact.
-        let firm=along>=Self.firmJolt && along>=size*Self.firmAlignment
+        let firm=along>=Self.firmJolt && along>=size*(lowSampleRate ? HeadphoneTapTuning.firmAlignment:Self.firmAlignment)
         let base=still(before:s.t-Self.leadIn),first=base != nil && lead ?? 0<=(firm ? Self.leadRotation:Self.calmLead)
         let exact=firm && justBefore.map{$0<=Self.calmRepeat} ?? false
         // A spike turned down a moment ago starts a run for the next tap, not for the rest of itself.
-        let repeated=s.t-runFrom<=Self.runFor && (runFrom==lastTap || s.t-runFrom>=Self.runStartAfter) && along>=Self.repeatJolt && justBefore.map{$0<=(firm ? Self.repeatRotation:Self.calmRepeat)} ?? false
+        let repeated=s.t-runFrom<=Self.runFor && (runFrom==lastTap || s.t-runFrom>=Self.runStartAfter) && along>=(lowSampleRate ? HeadphoneTapTuning.jolt:Self.repeatJolt) && justBefore.map{$0<=(firm ? Self.repeatRotation:Self.calmRepeat)} ?? false
         // Soon after a click, a tap's own echo is much weaker than it and comes with the hand turning.
         if s.t-lastTap<Self.refractory{
             guard repeated,along>=tapPeak*Self.echoShare,justBefore ?? .infinity<=Self.fastRotation else{return events}
         }
         guard first || repeated || exact else{
             // A tap turned down for coming straight after a move still starts a run, so the next one counts.
-            if along>=Self.repeatJolt,let justBefore,justBefore<=Self.runStartRotation{runFrom=s.t}
+            if along>=(lowSampleRate ? HeadphoneTapTuning.jolt:Self.repeatJolt),let justBefore,justBefore<=Self.runStartRotation{runFrom=s.t}
             ignore(s.t,along,base==nil ? unsteady(before:s.t-Self.leadIn,along:along):String(format:"jolt %.2f g, rotating %.0f°/s just before",along,lead ?? 0))
             return events
         }
@@ -133,6 +137,8 @@ struct ClosedCaseTapLearner {
     enum Event:Equatable{case tap(agreeing:Int,total:Int),tooSoft,finished(direction:SIMD3<Double>),failed}
     static let taps=3,mostTaps=6,tapsAgree=0.9,keepDefault=0.95,refractory=0.4,softAfter=0.08,windUp=2.0,windUpWithin=0.05
     private typealias Detector=ClosedCaseTapDetector
+    private let lowSampleRate:Bool
+    init(lowSampleRate:Bool=false){self.lowSampleRate=lowSampleRate}
     private var recent:[Detector.Sample]=[],rotation:(t:Double,w:SIMD3<Double>)?,lastTap = -Double.infinity,lastSoft = -Double.infinity,softSince:Double?
     private var pushing:(start:Double,first:SIMD3<Double>,strongest:SIMD3<Double>)?
     private(set) var pushes:[SIMD3<Double>]=[]
@@ -153,16 +159,16 @@ struct ClosedCaseTapLearner {
             recent.append(sample)
             while let first=recent.first,t-first.t>Detector.leadIn+Detector.stillWindow+2*Detector.maximumGap{recent.removeFirst()}
         }
-        guard let before=recent.last(where:{t-$0.t>=Detector.spikeOver}) ?? recent.first,t-before.t<=Detector.spikeGap else{return []}
+        guard let before=recent.last(where:{t-$0.t>=Detector.spikeOver}) ?? recent.first,t-before.t<=(lowSampleRate ? HeadphoneTapTuning.spikeGap:Detector.spikeGap) else{return []}
         let spike=v-before.a
-        // The first push is the finger's: what follows it, however strong, is the case rebounding.
         if let pushing{
             let along=(spike*pushing.first).sum()
-            if t-pushing.start<=Detector.peakWithin,along>0{
-                if length(spike)>length(pushing.strongest){self.pushing!.strongest=spike}
+            if t-pushing.start<=(lowSampleRate ? HeadphoneTapTuning.peakWithin:Detector.peakWithin),lowSampleRate || along>0{
+                // H1 must not let a stronger sideways rebound overwrite the detected tap axis.
+                if length(spike)>length(pushing.strongest), !lowSampleRate || abs(along)>=length(spike)*length(pushing.first)*HeadphoneTapTuning.peakAlignment{self.pushing!.strongest=spike}
                 return []
             }
-            if t-pushing.start<=Self.windUpWithin{
+            if t-pushing.start<=(lowSampleRate ? HeadphoneTapTuning.windUpWithin:Self.windUpWithin){
                 // The case can shift the other way just before a hard tap lands: a far bigger push this soon is the finger.
                 if along<0,length(spike)>=Self.windUp*length(pushing.strongest){self.pushing=(t,spike,spike);lastTap=t}
                 return []
@@ -178,9 +184,9 @@ struct ClosedCaseTapLearner {
         if length(spike)>=Detector.jolt{softSince=nil}
         // As in the detector, a firm tap may come with more turning just ahead of it.
         let lead=length(spike)>=Detector.firmJolt ? Detector.leadRotation:Detector.calmLead
-        let calm=recent.filter{$0.t>=t-Detector.leadIn && $0.t<=t-Detector.impactFrom}.allSatisfy{length($0.w)<=lead}
+        let calm=recent.filter{$0.t>=t-Detector.leadIn && $0.t<=t-(lowSampleRate ? HeadphoneTapTuning.impactFrom:Detector.impactFrom)}.allSatisfy{length($0.w)<=lead}
         guard calm,Detector.still(recent,before:t-Detector.leadIn) != nil else{return events}
-        guard length(spike)>=Detector.jolt else{
+        guard length(spike)>=(lowSampleRate ? HeadphoneTapTuning.learningJolt:Detector.jolt) else{
             if softSince==nil,t-lastSoft>=Self.refractory{softSince=t}
             return events
         }
@@ -188,7 +194,7 @@ struct ClosedCaseTapLearner {
         return events
     }
     private mutating func finish()->[Event]{
-        let group=Self.largestGroup(pushes)
+        let group=Self.largestGroup(pushes,agreement:lowSampleRate ? HeadphoneTapTuning.learningAgreement:Self.tapsAgree,axis:lowSampleRate)
         var events:[Event]=[.tap(agreeing:group.count,total:pushes.count)]
         if group.count>=Self.taps{
             let mean=Self.unit(group.reduce(.zero,+))
@@ -197,9 +203,12 @@ struct ClosedCaseTapLearner {
         return events
     }
     private static func unit(_ v:SIMD3<Double>)->SIMD3<Double>{v/max((v*v).sum().squareRoot(),1e-9)}
-    private static func largestGroup(_ pushes:[SIMD3<Double>])->[SIMD3<Double>]{
+    private static func largestGroup(_ pushes:[SIMD3<Double>],agreement:Double,axis:Bool)->[SIMD3<Double>]{
         let units=pushes.map(unit)
-        return units.map{one in units.filter{(one*$0).sum()>=tapsAgree}}.max{$0.count<$1.count} ?? []
+        if axis{
+            return units.map{one in units.filter{abs((one*$0).sum())>=agreement}.map{(one*$0).sum()<0 ? -$0:$0}}.max{$0.count<$1.count} ?? []
+        }
+        return units.map{one in units.filter{(one*$0).sum()>=agreement}}.max{$0.count<$1.count} ?? []
     }
 }
 
@@ -388,6 +397,22 @@ func runClosedCaseTapChecks(fixtures:URL?) throws {
         let segments=try loadClosedCaseTapFixtures(fixtures)
         var held=0,falseClicks:[String]=[]
         for segment in segments{
+            if segment.name=="h1learning"{
+                for batch in [1,5,64]{
+                    var learner=ClosedCaseTapLearner(lowSampleRate:true),input=HeadphoneTapInput(),events:[ClosedCaseTapLearner.Event]=[]
+                    for index in stride(from:0,to:segment.rows.count,by:batch){
+                        events+=learner.feed(input.feed(Array(segment.rows[index..<min(index+batch,segment.rows.count)])))
+                    }
+                    let impact=SIMD3(1.23916,-0.82497,-1.34518),expected=impact/(impact*impact).sum().squareRoot()
+                    guard let learned=direction(events),abs((learned*expected).sum())>0.95 else{
+                        throw LessonError.message("Recorded 25 Hz taps must teach a direction matching the clear impact, independent of batching.")
+                    }
+                }
+                guard direction(learn(segment.rows))==nil else{
+                    throw LessonError.message("The H1 regression must exercise the low-rate learner separately from H2.")
+                }
+                continue
+            }
             let events=replay(segment.rows,batch:5)
             guard balanced(events) else{throw LessonError.message("\(segment.name): a held pointer was never released.")}
             // The tap segments are with the lid open, where a tap pushes another way. The app only clicks with it closed.
@@ -399,7 +424,8 @@ func runClosedCaseTapChecks(fixtures:URL?) throws {
         guard falseClicks.isEmpty else{throw LessonError.message("Recorded handling clicked: \(falseClicks.joined(separator:", ")).")}
         // 15 soft taps on the closed case in the hand; the last is followed at once by movement and may be missed.
         guard (14...15).contains(held) else{throw LessonError.message("\(held) of 15 recorded hand-held taps clicked; at least 14 must.")}
-        detail+="; \(held) of 15 hand-held recorded taps clicked, \(segments.filter{!$0.name.hasPrefix("tap") && $0.name != "held"}.count) recorded handling and pointing segments never clicked"
+        try runHeadphoneTapChecks(fixtures:fixtures.deletingLastPathComponent().appendingPathComponent("HeadphoneTapFixtures.csv"))
+        detail+="; \(held) of 15 hand-held recorded taps clicked, \(segments.filter{!$0.name.hasPrefix("tap") && $0.name != "held" && $0.name != "h1learning"}.count) recorded handling and pointing segments never clicked; recorded H1 25 Hz learning"
     }
     print("PASS: closed-case tap detection, \(detail)")
 }

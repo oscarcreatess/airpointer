@@ -46,6 +46,8 @@
 //                           e.g. in a synchronous Bluetooth call); exited without finishing cleanup.
 // The first cause wins: a later cleanup problem never replaces it.
 #import <Foundation/Foundation.h>
+// H1 uses the system motion API and shared output and exit handling, without AACP or MTIC keep-alive.
+// Additional H1 exit codes: 54 for motion permission, 55 for no initial motion, 56 for another connected headset.
 #import <IOBluetooth/IOBluetooth.h>
 #import <CoreBluetooth/CoreBluetooth.h>
 #import <fcntl.h>
@@ -68,9 +70,13 @@ enum {
     HelperExitReplyTimeout=40,HelperExitUnexpectedReply=41,HelperExitWriteFailed=42,HelperExitMotionStale=43,
     HelperExitInputEnded=44,HelperExitSensorStopFailed=45,HelperExitReleaseUnconfirmed=46,
     HelperExitLeaseExpired=50,HelperExitMotionPipeClosed=51,HelperExitSignaled=52,HelperExitCleanupTimeout=53,
+    HelperExitMotionNotAuthorized=54,HelperExitHeadphoneBaselineUnavailable=55,HelperExitMotionSourceAmbiguous=56,
 };
 typedef struct {int code;const char *name;const char *meaning;} HelperExitInfo;
 static const HelperExitInfo helperExitTable[]={
+    {HelperExitMotionNotAuthorized,"MOTION_NOT_AUTHORIZED","headphone motion permission not granted"},
+    {HelperExitHeadphoneBaselineUnavailable,"HEADPHONE_BASELINE_UNAVAILABLE","no headphone motion; check ear detection and lift an earbud"},
+    {HelperExitMotionSourceAmbiguous,"MOTION_SOURCE_AMBIGUOUS","another headset is connected"},
     {HelperExitOK,"OK","stopped on request"},
     {HelperExitUsage,"USAGE","wrong arguments"},
     {HelperExitIncomplete,"INCOMPLETE","session ended with no stop request or other cause"},
@@ -781,6 +787,8 @@ static BOOL phaseIsStop(NSURL *phaseURL) {
     NSString *phase=[[NSString stringWithContentsOfURL:phaseURL encoding:NSUTF8StringEncoding error:nil] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     return [phase isEqualToString:@"stop"];
 }
+#include "HeadphoneMotion.m"
+
 static int runPointerSession(CBL2CAPChannel *channel, NSURL *directory) {
     double began=NSProcessInfo.processInfo.systemUptime;
     // Only bounds setup. The live loop moves this to now+15 on every pass, so a
@@ -1077,7 +1085,7 @@ static void hardeningChecks(void) {
         if(e.code<0 || e.code==1 || e.code>=100 || !strlen(e.name) || !strlen(e.meaning)) tableValid=NO;
         [codes addObject:@(e.code)];[names addObject:@(e.name)];
     }
-    check(tableValid && codes.count==entries && names.count==entries && entries==32,@"exit-code table has 32 distinct documented codes below 100, none equal to 1");
+    check(tableValid && codes.count==entries && names.count==entries && entries==35,@"退出码表含 35 个不同的已说明代码, 均小于 100 且不为 1");
     const int required[]={HelperExitBluetoothNotAuthorized,HelperExitTargetNotPaired,HelperExitChannelNotObtained,HelperExitReconnectFailed,HelperExitReplyTimeout,
         HelperExitMotionStale,HelperExitUnexpectedReply,HelperExitLeaseExpired,HelperExitMotionPipeClosed,HelperExitPrivateAPIMissing,HelperExitSignaled,HelperExitNoSessionReply,
         HelperExitInputEnded,HelperExitCleanupTimeout};
@@ -1250,6 +1258,15 @@ static void hardeningChecks(void) {
     check(!writeFailureMeansLinkEnded(0,HelperExitWriteFailed,NO) && !writeFailureMeansLinkEnded(HelperExitLeaseExpired,HelperExitWriteFailed,YES) && !writeFailureMeansLinkEnded(0,HelperExitReplyTimeout,YES),@"other failures and write failures on a live channel keep their codes");
 }
 static int offlineSelfTest(void) {
+    double headphoneValues[6];
+    check(headphoneMotionValues((CMAcceleration){0,0,-1},(CMAcceleration){.2,0,0},(CMRotationRate){M_PI/2,0,0},headphoneValues) && fabs(headphoneValues[0]-.2)<1e-9 && headphoneValues[2]==-1 && fabs(headphoneValues[3]-90)<1e-9,@"系统运动数据转换为 g 和 deg/s");
+    check(!headphoneMotionValues((CMAcceleration){NAN,0,0},(CMAcceleration){0,0,0},(CMRotationRate){0,0,0},headphoneValues),@"忽略非有限的系统运动数据");
+    FILE *headphoneFile=tmpfile();NSUInteger headphoneSequence=0;double frameValues[]={0,0,1,0,0,90};
+    check(headphoneFile && writeHeadphoneMotionFrame(headphoneFile,&headphoneSequence,1234567,2,frameValues),@"系统运动帧写入七列管道");
+    rewind(headphoneFile);char headphoneLine[256];unsigned long sequence1=0,sequence2=0;unsigned service1=0,service2=0;unsigned long long stamp1=0,stamp2=0;
+    BOOL firstFrame=fgets(headphoneLine,sizeof(headphoneLine),headphoneFile) && sscanf(headphoneLine,"%lu,%u,%llu",&sequence1,&service1,&stamp1)==3;
+    BOOL secondFrame=fgets(headphoneLine,sizeof(headphoneLine),headphoneFile) && sscanf(headphoneLine,"%lu,%u,%llu",&sequence2,&service2,&stamp2)==3;
+    check(firstFrame && secondFrame && sequence1==1 && sequence2==2 && service1==11 && service2==12 && stamp1==1234567 && stamp2==stamp1,@"同帧加速度和角速度共享时间戳且序号递增");fclose(headphoneFile);
     sessionChecks();
     hardeningChecks();
     ConsoleReader *sensorReader=ConsoleReader.new;sensorReader.motionStream=tmpfile();check(sensorReader.motionStream!=NULL,@"offline sensor stream opened");testSensorWire(sensorReader,100);
@@ -1419,7 +1436,8 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
     setbuf(stdout, NULL);
     if(argc==2 && !strcmp(argv[1],"--self-test")) return offlineSelfTest();
     if(argc==3 && !strcmp(argv[1],"--self-test-watchdog-child")) return watchdogChild(argv[2]);
-    if(argc!=4 || strcmp(argv[2],"--pointer-session")) {puts("Usage: ClosedCaseMotion TARGET_ADDRESS_FILE --pointer-session NEW_CAPTURE_DIRECTORY");return HelperExitUsage;}
+    BOOL headphoneSession=argc==4 && !strcmp(argv[2],"--headphone-session");
+    if(argc!=4 || (!headphoneSession && strcmp(argv[2],"--pointer-session"))) {puts("Usage: ClosedCaseMotion TARGET_ADDRESS_FILE --pointer-session|--headphone-session NEW_CAPTURE_DIRECTORY");return HelperExitUsage;}
     motionOnStdout=YES;
     sensorSequencePath=[@(argv[1]).stringByDeletingLastPathComponent stringByAppendingPathComponent:@"closed-case-sensor-sequence.txt"];
     // A closed parent pipe must never kill the helper mid-reconnect, and a
@@ -1441,6 +1459,7 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
         if ([normalize(candidate.addressString) isEqualToString:normalize(target)]) { device = candidate; break; }
     }
     if (!device) return finishHelper(HelperExitTargetNotPaired,@"exact target is not among the paired devices; stopped");
+    if(headphoneSession) return finishHelper(runHeadphoneSession(device,directory),nil);
     // Preflight every private API before anything disruptive happens.
     Class coordinatorClass=NSClassFromString(@"IOBluetoothCoreBluetoothCoordinator");
     if(!coordinatorClass || ![coordinatorClass respondsToSelector:@selector(sharedInstance)]) return finishHelper(HelperExitPrivateAPIMissing,@"IOBluetoothCoreBluetoothCoordinator.sharedInstance unavailable");

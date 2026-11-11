@@ -71,16 +71,24 @@ final class TapClickSound {
         }
         if let buffer{
             engine.attach(node)
-            // macOS 27 replaced the silent connect with one that reports failure; without a link there is no click.
+            // 旧 SDK 不包含 macOS 27 的符号, 需同时检查编译环境和运行时版本.
+            #if AIRPOINTER_MACOS27_SDK
             if #available(macOS 27,*){if (try? engine.connectNode(node,to:engine.mainMixerNode,format:buffer.format)) == nil{engine.detach(node);self.buffer=nil}}
             else{engine.connect(node,to:engine.mainMixerNode,format:buffer.format)}
+            #else
+            engine.connect(node,to:engine.mainMixerNode,format:buffer.format)
+            #endif
         }
     }
     // A change of output stops the engine, so anything that needs it brings it back.
     private func run(){
         guard buffer != nil,!engine.isRunning else{return}
         guard (try? engine.start()) != nil else{return}
+        #if AIRPOINTER_MACOS27_SDK
         if #available(macOS 27,*){try? node.playAudio()}else{node.play()}
+        #else
+        node.play()
+        #endif
     }
     func start(){queue.async{self.run()}}
     func stop(){queue.async{self.node.stop();self.engine.stop()}}
@@ -283,6 +291,24 @@ func runClosedCaseNativeChecks() throws {
           try readClosedCaseMotionPipe(pipe.fileHandleForReading)==nil else{throw LessonError.message("Live pipe data must remain ordered without polling delays.")}
     try pipe.fileHandleForWriting.close()
     guard try readClosedCaseMotionPipe(pipe.fileHandleForReading)==nil else{throw LessonError.message("Live pipe must finish cleanly.")}
+    let h1Acceleration:[Double]=[1,11,1000000,1,0,0,100000],h1Rotation:[Double]=[2,12,1000000,1,0,0,9000000]
+    var h1Input=HeadphoneTapInput()
+    guard h1Input.feed([h1Acceleration]).isEmpty else{throw LessonError.message("An incomplete headphone frame must wait for its matching rotation.")}
+    let h1Pair=h1Input.feed([h1Rotation])
+    guard h1Pair.count==2,h1Pair[0][1]==12,h1Pair[1][1]==11,h1Pair[1][2]-h1Pair[0][2]==1,
+          h1Pair[0][6]==9000000,h1Pair[1][6]==100000,
+          h1Input.feed([h1Acceleration,h1Rotation]).isEmpty else{
+        throw LessonError.message("Headphone tap input must use same-frame rotation once, even when the pipe splits it.")
+    }
+    var reverseInput=HeadphoneTapInput(),missingInput=HeadphoneTapInput()
+    guard reverseInput.feed([h1Rotation,h1Acceleration])==h1Pair else{throw LessonError.message("Headphone pairing must accept reversed arrival order.")}
+    var nextAcceleration=h1Acceleration,nextRotation=h1Rotation
+    nextAcceleration[2]+=40000;nextRotation[2]+=40000
+    guard missingInput.feed([h1Acceleration,nextRotation]).isEmpty,
+          missingInput.feed([nextAcceleration]).count==2 else{throw LessonError.message("Different headphone frames must never be paired across a dropped report.")}
+    var legacyInput=HeadphoneTapInput(),legacyRotation=h1Rotation
+    legacyRotation[2]+=1
+    guard legacyInput.feed([h1Acceleration,legacyRotation])==h1Pair else{throw LessonError.message("Recorded headphone frames with the old 1 us offset must remain replayable.")}
     guard closedCaseConnectionFresh(reportAge:1.05,sensorAges:[0.01,0.02],motionAge:0.01),
           !closedCaseConnectionFresh(reportAge:3,sensorAges:[0,0],motionAge:0.01),
           !closedCaseShouldPause(motionAge:1.9),
@@ -338,6 +364,12 @@ func runClosedCaseNativeChecks() throws {
         throw LessonError.message("AirPods 4 and AirPods 4 ANC must be found by their product IDs.")
     }
     let bothConnected=ClosedCaseAirPods.Survey(poweredOn:true,pairs:survey.pairs.map{ClosedCaseAirPods(name:$0.name,model:$0.model,address:$0.address,connected:true,productID:$0.productID)})
+    let h1Listing:[String:Any]=["SPBluetoothDataType":[["device_connected":[["Renamed earbuds":["device_vendorID":"0x004C","device_productID":"0x200E","device_address":"0A:1B:2C:3D:4E:64"]]]]]]
+    guard let h1=ClosedCaseAirPods.parse(try JSONSerialization.data(withJSONObject:h1Listing))?.pairs.first,
+          h1.model=="AirPods Pro 1",h1.usesHeadphoneMotion,!survey.pairs.contains(where:\.usesHeadphoneMotion),
+          [54,55,56].allSatisfy({ClosedCaseAirPods.helperFailure(Int32($0),stopping:false) != nil}) else{
+        throw LessonError.message("AirPods Pro 1 must use headphone motion with actionable permission and setup failures.")
+    }
     guard ClosedCaseAirPods.choose(survey,saved:"0a:1b:2c:3d:4e:62") == .chosen(survey.pairs[1]),
           ClosedCaseAirPods.choose(survey,saved:nil) == .chosen(survey.pairs[0]),
           ClosedCaseAirPods.choose(bothConnected,saved:"0A:1B:2C:3D:4E:99") == .several,
@@ -390,6 +422,17 @@ func runClosedCaseNativeChecks() throws {
     }
     let degrees=context.evaluateScript("norm(rotation(rawFusion.q))*180/Math.PI")?.toDouble() ?? 0
     guard abs(degrees-30)<0.04 else{throw LessonError.message("Native raw orientation scale or integration failed.")}
+    let h1Context=try makeClosedCaseMotionContext()
+    h1Context.evaluateScript("""
+    var seq=0,stamp=1000000;
+    function sample(w){stamp+=40000;rawFusion.feed([++seq,11,stamp,stamp/1e6,0,0,100000]);rawFusion.feed([++seq,12,stamp,stamp/1e6,0,0,w*1e5]);}
+    for(let i=0;i<60;i++)sample(0);
+    for(let i=0;i<25;i++)sample(30);
+    """)
+    let h1Degrees=h1Context.evaluateScript("norm(rotation(rawFusion.q))*180/Math.PI")?.toDouble() ?? 0
+    guard h1Context.exception==nil,abs(h1Degrees-30)<0.04 else{
+        throw LessonError.message("Headphone motion at 25 Hz must reuse the existing orientation scale and integration.")
+    }
     let warm=context.evaluateScript("JSON.stringify({bias:rawFusion.bias,q:rawFusion.q})")?.toString()
     context.evaluateScript("rawGrip=new Grip()")
     guard context.evaluateScript("rawFusion.ready")?.toBool()==true,
@@ -494,14 +537,20 @@ final class ClosedCaseSession: NSObject {
     var tapTest:((TapOutcome)->Void)?
     // While learning, taps teach the direction instead of clicking.
     private var tapLearner:ClosedCaseTapLearner?,onTapLearning:((ClosedCaseTapLearner.Event)->Void)?
-    func learnTaps(_ handler:@escaping(ClosedCaseTapLearner.Event)->Void){tapLearner=ClosedCaseTapLearner();onTapLearning=handler}
+    func learnTaps(_ handler:@escaping(ClosedCaseTapLearner.Event)->Void){tapLearner=ClosedCaseTapLearner(lowSampleRate:usesHeadphoneMotion);onTapLearning=handler}
     func stopLearningTaps(){tapLearner=nil;onTapLearning=nil}
-    var tapDirection:[Double]?{didSet{
-        tapDetector.direction=tapDirection.flatMap{$0.count==3 ? SIMD3($0[0],$0[1],$0[2]):nil} ?? ClosedCaseTapDetector.tapDirection
+    var tapDirection:[Double]?{didSet{refreshTapDirection()}}
+    func refreshTapDirection(){
+        tapDetector.direction=HeadphoneTapCalibration.direction(h2:tapDirection,headphone:usesHeadphoneMotion)
         backTapDetector.direction = -tapDetector.direction
-    }}
+    }
     var onEnded:((String?)->Void)?
     var opensLidFirst=false
+    private(set) var usesHeadphoneMotion=false{didSet{
+        tapDetector.lowSampleRate=usesHeadphoneMotion
+        backTapDetector.lowSampleRate=usesHeadphoneMotion
+        refreshTapDirection()
+    }}
     private(set) var lostContact=false
     var isActive:Bool{preparing || helper?.isRunning == true  ||  bootstrap?.isRunning == true}
     var inputReady:Bool{connected && ProcessInfo.processInfo.systemUptime-lastHost<0.5}
@@ -548,6 +597,7 @@ final class ClosedCaseSession: NSObject {
     private var pointerFilter=ClosedCasePointerFilter()
     private var readStats=(count:0,total:0.0,longest:0.0,since:0.0)
     private var tapDetector=ClosedCaseTapDetector(),recentPoints:[(t:Double,point:CGPoint)]=[],tapHold:CGPoint?
+    private var headphoneTapInput=HeadphoneTapInput()
     private var dragLock=ClosedCaseDragLock()
     // A tap on the back pushes the sensor the opposite way and right-clicks. The case rocks back after any tap,
     // so a tap from the other side within echoGap of an accepted one is ignored. (After musubipapi/airpointer#12.)
@@ -649,6 +699,7 @@ final class ClosedCaseSession: NSObject {
         }
         if let savedGrip=cachedGrip{motion?.loadGrip(savedGrip)}
         calibrated=false;generation=0;lastHost=0;pending=Data();smooth=CGPoint(x:0.5,y:0.5)
+        headphoneTapInput=HeadphoneTapInput()
         pointerFilter=ClosedCasePointerFilter()
         setAim(smooth);feedError=nil;savedMeasure=0
     }
@@ -693,6 +744,7 @@ final class ClosedCaseSession: NSObject {
                 guard let self,self.preparing,self.preparation==token else{return}
                 let choice=ClosedCaseAirPods.choose(survey,saved:ClosedCaseAirPods.saved)
                 guard case .chosen(let pair)=choice else{self.finished(choice.failure ?? "");return}
+                self.usesHeadphoneMotion=pair.usesHeadphoneMotion
                 do{try ClosedCaseAirPods.save(pair)}catch{self.finished("AirPointer couldn’t save which AirPods to use. Connect again.");return}
                 AudioOutputGuard.shared.sessionStarted(target:pair.address)
                 loadClosedCaseCalibration(from:self.calibrationURL,grip:self.gripURL,target:self.target){[weak self] hash,saved,grip in
@@ -731,7 +783,7 @@ final class ClosedCaseSession: NSObject {
             try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
             capture=folder.appendingPathComponent("recording",isDirectory:true)
             lastLease=0;endMessage="Paused";try renewSessionLease()
-            if let address=try? String(contentsOf:target,encoding:.utf8){
+            if !usesHeadphoneMotion,let address=try? String(contentsOf:target,encoding:.utf8){
                 silentOutput=PointerSilentOutput(targetAddress:address)
             }
             log=try closedCaseAppendingHandle(folder.appendingPathComponent("native.log"))
@@ -754,7 +806,7 @@ final class ClosedCaseSession: NSObject {
             finished("The closed-case motion component is missing.");return
         }
         let process=Process();helper=process;process.executableURL=executable
-        process.arguments=[target.path,"--pointer-session",capture.path]
+        process.arguments=[target.path,usesHeadphoneMotion ? "--headphone-session":"--pointer-session",capture.path]
         var errorPipe:Pipe?
         let motionPipe=Pipe();stream=motionPipe.fileHandleForReading
         let flags=fcntl(motionPipe.fileHandleForReading.fileDescriptor,F_GETFL)
@@ -826,7 +878,7 @@ final class ClosedCaseSession: NSObject {
         connected=closedCaseConnectionFresh(reportAge:age,sensorAges:sensors.map{$0["age_seconds"] as? Double ?? 100},motionAge:ProcessInfo.processInfo.systemUptime-lastHost)
         if connected && !stopping{silentOutput?.refresh()}
         ready = !stopping && !confirmed && connected && (state["open_baseline_verified"] as? Bool == true) && 
-            (cs["root_identity_verified"] as? Bool == true)
+            (cs["root_identity_verified"] as? Bool == true || (usesHeadphoneMotion && cs["target_identity_verified"] as? Bool == true))
         if ready && !loggedReady{loggedReady=true;step("close lid shown")}
         if ready,helper?.isRunning == true,closedCaseLidClosed(closedCaseInCaseReports(state["earbud_state_events"])){
             confirmClosed()
@@ -857,10 +909,11 @@ final class ClosedCaseSession: NSObject {
             }
             guard !rows.isEmpty else{return}
             defer{noteRead(from:readAt)}
-            let tapEvents=tapLearner==nil && enabled && calibrated ? tapDetector.feed(rows):tapDetector.reset()
-            let backEvents=tapLearner==nil && tapTest==nil && enabled && calibrated && backTapOn ? backTapDetector.feed(rows):backTapDetector.reset()
+            let tapRows=usesHeadphoneMotion ? headphoneTapInput.feed(rows):rows
+            let tapEvents=tapLearner==nil && enabled && calibrated ? tapDetector.feed(tapRows):tapDetector.reset()
+            let backEvents=tapLearner==nil && tapTest==nil && enabled && calibrated && backTapOn ? backTapDetector.feed(tapRows):backTapDetector.reset()
             backTapDetector.ignored=[]
-            for event in tapLearner?.feed(rows) ?? []{
+            for event in tapLearner?.feed(tapRows) ?? []{
                 if case .tap=event,clickSound{TapClickSound.shared.play()}
                 try? log?.write(contentsOf:Data("TAPLEARN \(event)\n".utf8))
                 if case .finished=event{tapLearner=nil}else if case .failed=event{tapLearner=nil}

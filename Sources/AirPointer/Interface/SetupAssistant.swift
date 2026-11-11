@@ -20,6 +20,7 @@ struct SetupState:Equatable {
     var calibrated=false
     var holdProgress=0.0
     var taps=SetupTaps()
+    var headphoneMotion=false
     var connected:Bool{link == .connected}
 }
 
@@ -35,7 +36,7 @@ final class SetupAssistant:NSObject,NSWindowDelegate {
         ("Show it where your screen is","Point at three dots — center, right edge, top edge. Hold still on each and it captures automatically. Keep the grip you’ll use."),
         ("Teach it your tap","Tap the front of the case three times, with a short pause between taps. Hold it the way you’ll point with it."),
     ]
-    private static let connectEffects="Your Mac can’t use your AirPods for audio while connected, so don’t connect during a call. Ending a session uses up diagnostic data on the case and changes some AirPods settings. These changes may last."
+    private static let connectEffects="Your Mac can’t use your AirPods for audio while connected, so don’t connect during a call. With AirPods Pro 2 or 3, ending a session uses up diagnostic data on the case and changes some AirPods settings. These changes may last."
     private var state=SetupState()
     private var everConnected=false
     private var helpDue=false
@@ -230,7 +231,8 @@ final class SetupAssistant:NSObject,NSWindowDelegate {
             case .openLid:caseArt.step = .opening;chipText="Waiting for the lid";main=("Connecting…",.none)
             case .connecting:
                 caseArt.step = .open;chipText="Looking for your AirPods…";main=("Connecting…",.none)
-                if helpDue{noteText="Not connecting? Lift one AirPod out for a moment and put it back."}
+                if s.headphoneMotion{noteText="For AirPods Pro 1, turn off Automatic Ear Detection in AirPods settings. If motion doesn’t start, briefly lift one AirPod out and put it back."}
+                else if helpDue{noteText="Not connecting? Lift one AirPod out for a moment and put it back."}
             case .closeLid:caseArt.step = .close;chipText="Connected";dot=true;main=("Lid Closed",.lidClosed)
             case .turnUpright:caseArt.step = .turn;chipText="Connected";dot=true;main=("Continue",.none)
             case .holdStill:caseArt.step = .closed;caseArt.holdProgress=CGFloat(s.holdProgress);chipText="Keep it still";main=("Continue",.none)
@@ -274,7 +276,7 @@ final class SetupAssistant:NSObject,NSWindowDelegate {
         case .idle:return Self.copy[1]
         case .openLid:return ("Open the lid","AirPointer connects when you open it. Keep both AirPods inside.")
         case .connecting:return (Self.copy[1].0,"Keep the lid open for a moment.")
-        case .closeLid:return ("Close the lid","Keep both AirPods inside. AirPointer goes on by itself, or press Return.")
+        case .closeLid:return ("Close the lid",state.headphoneMotion ? "Keep both AirPods inside, close the lid, then press Return.":"Keep both AirPods inside. AirPointer goes on by itself, or press Return.")
         case .turnUpright:return ("Turn it upright","Give the closed case a quarter turn clockwise.")
         case .holdStill:return ("Set it down","Put the closed case on a flat surface for a moment.")
         case .connected:return ("You’re connected","Keep holding the case like this.")

@@ -1,0 +1,14 @@
+{
+  "hits": 9,
+  "quickClicks": 8,
+  "extraClicks": 0,
+  "falseClicks": 0,
+  "moveHits": 2,
+  "moveExtra": 0,
+  "direction": [
+    0.663962796128693,
+    -0.15806617188061342,
+    -0.7308683128060595
+  ],
+  "continuousMovement": true
+}

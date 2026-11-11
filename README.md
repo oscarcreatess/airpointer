@@ -17,11 +17,11 @@
 
 | Effect | What happens |
 |---|---|
-| **Case data** | Ending a session uses up the diagnostic data stored on the case. |
-| **AirPods settings** | Some AirPods connection settings stay as the session set them. We do not know yet if this change, or the case data change, lasts after the Bluetooth link resets. |
-| **Audio** | Each connection drops the AirPods' Bluetooth link for a moment, and their audio stops. Do not connect during a call. |
+| **Case data (Pro 2/3)** | Ending a session uses up the diagnostic data stored on the case. |
+| **AirPods settings (Pro 2/3)** | Some AirPods connection settings stay as the session set them. We do not know yet if this change, or the case data change, lasts after the Bluetooth link resets. |
+| **Audio** | Audio is moved off the AirPods during a session. Pro 2/3 connections also drop their Bluetooth link for a moment. Do not connect during a call. |
 | **Microphone** | During a session, the app keeps Mac sound and the microphone off all AirPods. It restores them when the session ends. After a force quit, it restores them when you next open the app, if the AirPods are still connected. |
-| **Silent audio** | During a session, the app plays silence to the AirPods to keep their audio link active. You do not hear it. |
+| **Silent audio (Pro 2/3)** | During a session, the app plays silence to the AirPods to keep their audio link active. You do not hear it. |
 | **Cursor size** | A cursor smaller than 2× grows to 2× while you point. It returns to its size when you pause or disconnect. After a force quit, it returns when you next open the app. This uses a private macOS call. |
 
 ## Requirements
@@ -33,6 +33,7 @@
 | AirPods 4 with ANC | Tested on one Mac with one pair |
 | AirPods Pro 2 (Lightning and USB-C) | Recognized, not tested |
 | AirPods 4 | Recognized, not tested |
+| AirPods Pro 1 | Experimental, Tested on one Mac with one pair |
 | AirPods paired with your Mac | Required |
 | Xcode | Required to build |
 
@@ -236,7 +237,7 @@ Sources/
                        guard, cursor size
     Interface/         The window, menu bar, notch, setup and Tap Test
     Checks/            Window and pose checks; other checks sit beside their code
-  ClosedCaseMotion/    The helper that talks to the AirPods
+  ClosedCaseMotion/    The helper, with native H2 and system H1 motion inputs
   ClosedCaseRestore/   The helper that brings the Bluetooth link up
 Tests/                 Recorded taps and handling for the tap check
 Assets/                Images, sounds and the 3D case model

@@ -240,9 +240,14 @@ extension App {
             case .tooSoft:self.setupTaps.soft=true
             case .finished(let direction):
                 self.setupTaps=SetupTaps(heard:ClosedCaseTapLearner.taps,learned:true)
-                self.pointerSettings.tapDirection=direction==ClosedCaseTapDetector.tapDirection ? nil:[direction.x,direction.y,direction.z]
-                self.pointerSettings.persist()
-                self.closedCaseSession?.tapDirection=self.pointerSettings.tapDirection
+                if self.closedCaseSession?.usesHeadphoneMotion == true{
+                    HeadphoneTapCalibration.save(direction)
+                    self.closedCaseSession?.refreshTapDirection()
+                }else{
+                    self.pointerSettings.tapDirection=direction==ClosedCaseTapDetector.tapDirection ? nil:[direction.x,direction.y,direction.z]
+                    self.pointerSettings.persist()
+                    self.closedCaseSession?.tapDirection=self.pointerSettings.tapDirection
+                }
             case .failed:self.setupTaps=SetupTaps(failed:true)
             }
             self.refreshSetup()
@@ -264,7 +269,7 @@ extension App {
                                 calibrating:calibrator.isActive,
                                 calibrated:session?.calibrated == true,
                                 holdProgress:session?.holdProgress ?? 0,
-                                taps:setupTaps))
+                                taps:setupTaps,headphoneMotion:session?.usesHeadphoneMotion == true))
     }
 }
 
